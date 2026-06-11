@@ -1,13 +1,17 @@
+"""Download gallery images from Platesmania pages with Selenium."""
+
 import argparse
 import mimetypes
 import re
 from pathlib import Path
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse, urlunparse
 
 import requests
 
-from selenium import webdriver
+from selenium.webdriver import Chrome
+from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
@@ -22,6 +26,10 @@ IMAGE_SELECTOR = (
     "> div:nth-child(5) > div:nth-child(1) > div > div.panel-body "
     "> div:nth-child(4) > div > a > img"
 )
+FALLBACK_IMAGE_SELECTOR = (
+    "body > div.wrapper > div.container.content > div > div.col-md-9 "
+    "div.panel-body a img"
+)
 
 IMAGE_ATTRIBUTES = ("src", "data-src", "data-original", "data-lazy-src")
 DEFAULT_GALLERY_URLS = [
@@ -33,11 +41,12 @@ DEFAULT_GALLERY_URLS = [
 
 
 def count_cards(url: str, timeout: int, headless: bool) -> int:
-    options = webdriver.ChromeOptions()
+    """Count card containers on one gallery page."""
+    options = Options()
     if headless:
         options.add_argument("--headless=new")
 
-    driver = webdriver.Chrome(options=options)
+    driver = Chrome(options=options)
     try:
         driver.get(url)
 
@@ -51,16 +60,22 @@ def count_cards(url: str, timeout: int, headless: bool) -> int:
         driver.quit()
 
 
-def get_image_urls(driver: webdriver.Chrome, page_url: str) -> list[str]:
+def get_image_urls(driver: Chrome, page_url: str) -> list[str]:
+    """Collect image URLs from the rendered gallery page."""
     images = driver.find_elements(By.CSS_SELECTOR, IMAGE_SELECTOR)
+    if not images:
+        images = driver.find_elements(By.CSS_SELECTOR, FALLBACK_IMAGE_SELECTOR)
+
     urls = []
     seen = set()
 
     for image in images:
-        image_url = next(
-            (image.get_attribute(attribute) for attribute in IMAGE_ATTRIBUTES if image.get_attribute(attribute)),
-            None,
-        )
+        image_url = None
+        for attribute in IMAGE_ATTRIBUTES:
+            image_url = image.get_attribute(attribute)
+            if image_url:
+                break
+
         if not image_url:
             continue
 
@@ -73,6 +88,7 @@ def get_image_urls(driver: webdriver.Chrome, page_url: str) -> list[str]:
 
 
 def safe_filename(url: str, index: int, content_type: str | None) -> str:
+    """Build a safe local filename for one downloaded image."""
     parsed = urlparse(url)
     name = Path(unquote(parsed.path)).name
     name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
@@ -85,6 +101,7 @@ def safe_filename(url: str, index: int, content_type: str | None) -> str:
 
 
 def download_image(session: requests.Session, url: str, output_dir: Path, index: int) -> Path:
+    """Download one image and return its saved path."""
     response = session.get(url, timeout=30)
     response.raise_for_status()
 
@@ -95,6 +112,7 @@ def download_image(session: requests.Session, url: str, output_dir: Path, index:
 
 
 def country_code_from_url(url: str) -> str:
+    """Extract the country code path segment from a gallery URL."""
     path_parts = [part for part in urlparse(url).path.split("/") if part]
     if path_parts:
         return re.sub(r"[^A-Za-z0-9._-]", "_", path_parts[0])
@@ -103,20 +121,57 @@ def country_code_from_url(url: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", host)
 
 
+def page_slug_from_url(url: str) -> str:
+    """Extract the gallery page slug from a URL for output folders."""
+    path_parts = [part for part in urlparse(url).path.split("/") if part]
+    if len(path_parts) >= 2:
+        return re.sub(r"[^A-Za-z0-9._-]", "_", path_parts[1])
+
+    return "gallery"
+
+
+def paginated_gallery_urls(url: str, pages: int) -> list[str]:
+    """Build gallery pagination URLs like gallery, gallery-1, gallery-2."""
+    parsed = urlparse(url)
+    base_path = re.sub(r"/gallery(?:-\d+)?/?$", "/gallery", parsed.path)
+    urls = []
+
+    for page in range(pages):
+        path = base_path if page == 0 else f"{base_path}-{page}"
+        urls.append(urlunparse(parsed._replace(path=path)))
+
+    return urls
+
+
+def expand_gallery_urls(urls: list[str], pages: int) -> list[str]:
+    """Expand each gallery URL into its requested pagination range."""
+    expanded_urls = []
+    seen = set()
+
+    for url in urls:
+        for paginated_url in paginated_gallery_urls(url, pages):
+            if paginated_url not in seen:
+                expanded_urls.append(paginated_url)
+                seen.add(paginated_url)
+
+    return expanded_urls
+
+
 def download_images(
     url: str,
     timeout: int,
     headless: bool,
     output_dir: Path,
-    driver: webdriver.Chrome | None = None,
+    driver: Chrome | None = None,
 ) -> list[Path]:
-    options = webdriver.ChromeOptions()
+    """Download all selected images from one gallery page."""
+    options = Options()
     if headless:
         options.add_argument("--headless=new")
 
     owns_driver = driver is None
     if driver is None:
-        driver = webdriver.Chrome(options=options)
+        driver = Chrome(options=options)
 
     try:
         driver.get(url)
@@ -124,15 +179,18 @@ def download_images(
         WebDriverWait(driver, timeout).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, TABLE_SELECTOR))
         )
-        WebDriverWait(driver, timeout).until(
-            EC.presence_of_all_elements_located((By.CSS_SELECTOR, IMAGE_SELECTOR))
-        )
 
         image_urls = get_image_urls(driver, url)
+        if not image_urls:
+            print(f"Warning: no matching images found on {url}")
+            return []
+
         output_dir.mkdir(parents=True, exist_ok=True)
 
         session = requests.Session()
-        session.headers.update({"User-Agent": driver.execute_script("return navigator.userAgent;")})
+        session.headers.update(
+            {"User-Agent": driver.execute_script("return navigator.userAgent;")}
+        )
         for cookie in driver.get_cookies():
             session.cookies.set(cookie["name"], cookie["value"])
 
@@ -145,30 +203,38 @@ def download_images(
             driver.quit()
 
 
-def download_galleries(urls: list[str], timeout: int, headless: bool, output_dir: Path) -> dict[str, list[Path]]:
-    options = webdriver.ChromeOptions()
+def download_galleries(
+    urls: list[str], timeout: int, headless: bool, output_dir: Path
+) -> dict[str, list[Path]]:
+    """Download selected images from multiple gallery pages."""
+    options = Options()
     if headless:
         options.add_argument("--headless=new")
 
-    driver = webdriver.Chrome(options=options)
+    driver = Chrome(options=options)
     try:
         results = {}
         for url in urls:
             country_code = country_code_from_url(url)
-            country_output_dir = output_dir / country_code
-            results[url] = download_images(
-                url,
-                timeout,
-                headless,
-                country_output_dir,
-                driver=driver,
-            )
+            country_output_dir = output_dir / country_code / page_slug_from_url(url)
+            try:
+                results[url] = download_images(
+                    url,
+                    timeout,
+                    headless,
+                    country_output_dir,
+                    driver=driver,
+                )
+            except TimeoutException:
+                print(f"Warning: timed out waiting for page content on {url}")
+                results[url] = []
         return results
     finally:
         driver.quit()
 
 
 def main() -> None:
+    """Parse CLI arguments and download gallery images."""
     parser = argparse.ArgumentParser(
         description="Download images from a page using Selenium and a CSS selector."
     )
@@ -190,13 +256,19 @@ def main() -> None:
         help="Seconds to wait for the page content to appear",
     )
     parser.add_argument(
+        "--pages",
+        type=int,
+        default=1,
+        help="Number of gallery pages to download: gallery, gallery-1, gallery-2...",
+    )
+    parser.add_argument(
         "--show-browser",
         action="store_true",
         help="Run Chrome with a visible browser window instead of headless mode",
     )
     args = parser.parse_args()
 
-    urls = args.urls or DEFAULT_GALLERY_URLS
+    urls = expand_gallery_urls(args.urls or DEFAULT_GALLERY_URLS, args.pages)
     results = download_galleries(
         urls,
         args.timeout,
