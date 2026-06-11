@@ -23,12 +23,11 @@ CARD_SELECTOR = (
 )
 IMAGE_SELECTOR = (
     "body > div.wrapper > div.container.content > div > div.col-md-9 "
-    "> div:nth-child(5) > div:nth-child(1) > div > div.panel-body "
-    "> div:nth-child(4) > div > a > img"
+    ".panel.panel-grey > .panel-body > div.row:first-child a > img"
 )
 FALLBACK_IMAGE_SELECTOR = (
     "body > div.wrapper > div.container.content > div > div.col-md-9 "
-    "div.panel-body a img"
+    ".panel.panel-grey img[src*='/m/']"
 )
 
 IMAGE_ATTRIBUTES = ("src", "data-src", "data-original", "data-lazy-src")
@@ -80,6 +79,9 @@ def get_image_urls(driver: Chrome, page_url: str) -> list[str]:
             continue
 
         absolute_url = urljoin(page_url, image_url)
+        if "/m/" not in urlparse(absolute_url).path:
+            continue
+
         if absolute_url not in seen:
             urls.append(absolute_url)
             seen.add(absolute_url)
