@@ -347,6 +347,7 @@ def download_galleries(
     debug_dir: Path,
     dump_dom: bool,
     captcha: bool,
+    pages_arg: int,
     user_data_dir: str | None = None,
     profile_directory: str | None = None,
 ) -> dict[str, list[dict[str, str]]]:
@@ -361,8 +362,10 @@ def download_galleries(
             while input().strip().lower() != "ok":
                 print('Type "ok" to continue:')
 
+        expanded_urls = expand_gallery_urls(urls, pages_arg)
+
         results = {}
-        for url in urls:
+        for url in expanded_urls:
             country_code = country_code_from_url(url)
             country_output_dir = output_dir / country_code / page_slug_from_url(url)
             try:
@@ -418,8 +421,8 @@ def main() -> None:
     parser.add_argument(
         "--pages",
         type=int,
-        default=1,
-        help="Number of gallery pages to download: gallery, gallery-1, gallery-2...",
+        default=100,
+        help="Number of gallery pages to download. Default 100 = gallery through gallery-99.",
     )
     parser.add_argument(
         "--headless",
@@ -454,7 +457,7 @@ def main() -> None:
     user_data_dir = args.user_data_dir
     profile_directory = args.profile_directory
 
-    urls = expand_gallery_urls(args.urls or DEFAULT_GALLERY_URLS, args.pages)
+    urls = args.urls or DEFAULT_GALLERY_URLS
     results = download_galleries(
         urls,
         args.timeout,
@@ -463,6 +466,7 @@ def main() -> None:
         args.debug_dir,
         args.dump_dom,
         args.captcha,
+        args.pages,
         user_data_dir,
         profile_directory,
     )
