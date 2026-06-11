@@ -1,7 +1,6 @@
 .vscode
 __pycache__/
 .DS_Store
-.env
 debug_dom/
 chrome_profile/
 downloads/
